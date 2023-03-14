@@ -1,11 +1,14 @@
 #![allow(clippy::all)] // TODO: block build script creates many warnings.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::fmt::Display;
 use std::io::Write;
 use std::iter::FusedIterator;
 
 use anyhow::Context;
+use serde::{Deserialize, Deserializer};
+use serde::de::Error;
 use valence_protocol_macros::ident_str;
 
 use crate::ident::Ident;
@@ -114,5 +117,51 @@ mod tests {
             BlockState::GREEN_BANNER.wall_block_id(),
             Some(BlockState::GREEN_BANNER)
         );
+    }
+}
+
+// Deserialize BlockStates from minecraft's datapacks using serde
+impl<'de> Deserialize<'de> for BlockState {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error> where D: Deserializer<'de> {
+        #[derive(Deserialize)]
+        struct Raw {
+            #[serde(rename = "Name")]
+            name: Ident<String>,
+            #[serde(rename = "Properties")]
+            properties: HashMap<String, String>,
+        }
+
+        impl TryFrom<Raw> for BlockState {
+            type Error = String;
+
+            fn try_from(value: Raw) -> std::result::Result<Self, Self::Error> {
+                if value.name.namespace() != "minecraft" {
+                    return Err("only blocks from the minecraft namespace can be deserialized".to_string());
+                }
+
+                let kind = match BlockKind::from_str(value.name.path()) {
+                    None => return Err(format!("unknown block kind \"{}\"", value.name)),
+                    Some(kind) => kind,
+                };
+
+                let mut state = BlockState::from_kind(kind);
+                for (key, value) in value.properties {
+                    let name = match PropName::from_str(&key) {
+                        None => return Err(format!("unknown property \"{key}\"")),
+                        Some(name) => name
+                    };
+                    let value = match PropValue::from_str(&value) {
+                        None => return Err(format!("unable to parse property value \"{value}\" for \"{key}\"")),
+                        Some(value) => value
+                    };
+
+                    state = state.set(name, value);
+                }
+
+                Ok(state)
+            }
+        }
+
+        Raw::deserialize(deserializer)?.try_into().map_err(|e| D::Error::custom(e))
     }
 }
