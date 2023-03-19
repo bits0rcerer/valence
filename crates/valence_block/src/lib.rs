@@ -143,7 +143,7 @@ impl<'de> Deserialize<'de> for BlockState {
         struct Raw {
             #[serde(rename = "Name")]
             name: Ident<String>,
-            #[serde(rename = "Properties")]
+            #[serde(rename = "Properties", default)]
             properties: HashMap<String, String>,
         }
 
