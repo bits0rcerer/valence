@@ -499,12 +499,14 @@ impl PacketDecoder {
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
+
     use super::*;
     use crate::block_pos::BlockPos;
     use crate::ident::Ident;
     use crate::item::{ItemKind, ItemStack};
     use crate::text::{Text, TextFormat};
-    use crate::tracked_data::PaintingKind;
+    use crate::types::Hand;
     use crate::var_long::VarLong;
     use crate::Decode;
 
@@ -520,8 +522,8 @@ mod tests {
         d: f32,
         e: f64,
         f: BlockPos,
-        g: PaintingKind,
-        h: Ident<&'a str>,
+        g: Hand,
+        h: Ident<Cow<'a, str>>,
         i: Option<ItemStack>,
         j: Text,
         k: VarInt,
@@ -540,7 +542,7 @@ mod tests {
                 d: 5.001,
                 e: 1e10,
                 f: BlockPos::new(1, 2, 3),
-                g: PaintingKind::DonkeyKong,
+                g: Hand::Off,
                 h: Ident::new("minecraft:whatever").unwrap(),
                 i: Some(ItemStack::new(ItemKind::WoodenSword, 12, None)),
                 j: "my ".into_text() + "fancy".italic() + " text",

@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::cmp;
 
 use anyhow::bail;
@@ -8,16 +9,14 @@ use bevy_ecs::schedule::ScheduleLabel;
 use bevy_ecs::system::{SystemParam, SystemState};
 use glam::{DVec3, Vec3};
 use paste::paste;
-use tracing::warn;
+use tracing::{debug, warn};
 use uuid::Uuid;
 use valence_protocol::block_pos::BlockPos;
 use valence_protocol::ident::Ident;
 use valence_protocol::item::ItemStack;
 use valence_protocol::packet::c2s::play::click_slot::{ClickMode, Slot};
 use valence_protocol::packet::c2s::play::client_command::Action as ClientCommandAction;
-use valence_protocol::packet::c2s::play::client_settings::{
-    ChatMode, DisplayedSkinParts, MainHand,
-};
+use valence_protocol::packet::c2s::play::client_settings::{ChatMode, DisplayedSkinParts, MainArm};
 use valence_protocol::packet::c2s::play::player_action::Action as PlayerAction;
 use valence_protocol::packet::c2s::play::player_interact::Interaction;
 use valence_protocol::packet::c2s::play::recipe_category_options::RecipeBookId;
@@ -29,18 +28,19 @@ use valence_protocol::packet::c2s::play::update_structure_block::{
 use valence_protocol::packet::c2s::play::{
     AdvancementTabC2s, ClientStatusC2s, ResourcePackStatusC2s, UpdatePlayerAbilitiesC2s,
 };
+use valence_protocol::packet::s2c::play::InventoryS2c;
 use valence_protocol::packet::C2sPlayPacket;
-use valence_protocol::tracked_data::Pose;
 use valence_protocol::types::{Difficulty, Direction, Hand};
+use valence_protocol::var_int::VarInt;
 
 use super::{
     CursorItem, KeepaliveState, PlayerActionSequence, PlayerInventoryState, TeleportState,
-    ViewDistance,
 };
 use crate::client::Client;
 use crate::component::{Look, OnGround, Ping, Position};
-use crate::entity::{EntityAnimation, EntityKind, McEntity, TrackedData};
-use crate::inventory::Inventory;
+use crate::inventory::{Inventory, InventorySettings};
+use crate::packet::WritePacket;
+use crate::prelude::OpenInventory;
 
 #[derive(Clone, Debug)]
 pub struct QueryBlockNbt {
@@ -98,7 +98,7 @@ pub struct ClientSettings {
     /// `true` if the client has chat colors enabled, `false` otherwise.
     pub chat_colors: bool,
     pub displayed_skin_parts: DisplayedSkinParts,
-    pub main_hand: MainHand,
+    pub main_arm: MainArm,
     pub enable_text_filtering: bool,
     pub allow_server_listings: bool,
 }
@@ -138,7 +138,7 @@ pub struct CloseHandledScreen {
 #[derive(Clone, Debug)]
 pub struct CustomPayload {
     pub client: Entity,
-    pub channel: Ident<Box<str>>,
+    pub channel: Ident<String>,
     pub data: Box<[u8]>,
 }
 
@@ -263,7 +263,7 @@ pub struct PickFromInventory {
 pub struct CraftRequest {
     pub client: Entity,
     pub window_id: i8,
-    pub recipe: Ident<Box<str>>,
+    pub recipe: Ident<String>,
     pub make_all: bool,
 }
 
@@ -354,7 +354,7 @@ pub struct RecipeCategoryOptions {
 #[derive(Clone, Debug)]
 pub struct RecipeBookData {
     pub client: Entity,
-    pub recipe_id: Ident<Box<str>>,
+    pub recipe_id: Ident<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -395,7 +395,7 @@ pub struct ResourcePackStatusChange {
 #[derive(Clone, Debug)]
 pub struct OpenAdvancementTab {
     pub client: Entity,
-    pub tab_id: Ident<Box<str>>,
+    pub tab_id: Ident<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -452,9 +452,9 @@ pub struct CreativeInventoryAction {
 pub struct UpdateJigsaw {
     pub client: Entity,
     pub position: BlockPos,
-    pub name: Ident<Box<str>>,
-    pub target: Ident<Box<str>>,
-    pub pool: Ident<Box<str>>,
+    pub name: Ident<String>,
+    pub target: Ident<String>,
+    pub pool: Ident<String>,
     pub final_state: Box<str>,
     pub joint_type: Box<str>,
 }
@@ -676,6 +676,7 @@ pub(crate) struct EventLoopQuery {
     keepalive_state: &'static mut KeepaliveState,
     cursor_item: &'static mut CursorItem,
     inventory: &'static mut Inventory,
+    open_inventory: Option<&'static mut OpenInventory>,
     position: &'static mut Position,
     look: &'static mut Look,
     on_ground: &'static mut OnGround,
@@ -687,10 +688,17 @@ pub(crate) struct EventLoopQuery {
 /// An exclusive system for running the event loop schedule.
 fn run_event_loop(
     world: &mut World,
-    state: &mut SystemState<(Query<EventLoopQuery>, ClientEvents, Commands)>,
+    state: &mut SystemState<(
+        Query<EventLoopQuery>,
+        ClientEvents,
+        Commands,
+        Query<&Inventory, Without<Client>>,
+        Res<InventorySettings>,
+    )>,
     mut clients_to_check: Local<Vec<Entity>>,
 ) {
-    let (mut clients, mut events, mut commands) = state.get_mut(world);
+    let (mut clients, mut events, mut commands, mut inventories, inventory_settings) =
+        state.get_mut(world);
 
     update_all_event_buffers(&mut events);
 
@@ -708,7 +716,7 @@ fn run_event_loop(
 
         q.client.dec.queue_bytes(bytes);
 
-        match handle_one_packet(&mut q, &mut events) {
+        match handle_one_packet(&mut q, &mut events, &mut inventories, &inventory_settings) {
             Ok(had_packet) => {
                 if had_packet {
                     // We decoded one packet, but there might be more.
@@ -728,7 +736,8 @@ fn run_event_loop(
     while !clients_to_check.is_empty() {
         world.run_schedule(EventLoopSchedule);
 
-        let (mut clients, mut events, mut commands) = state.get_mut(world);
+        let (mut clients, mut events, mut commands, mut inventories, inventory_settings) =
+            state.get_mut(world);
 
         clients_to_check.retain(|&entity| {
             let Ok(mut q) = clients.get_mut(entity) else {
@@ -736,7 +745,7 @@ fn run_event_loop(
                 return false;
             };
 
-            match handle_one_packet(&mut q, &mut events) {
+            match handle_one_packet(&mut q, &mut events, &mut inventories, &inventory_settings) {
                 Ok(had_packet) => had_packet,
                 Err(e) => {
                     warn!("failed to dispatch events for client {:?}: {e:?}", q.entity);
@@ -753,6 +762,8 @@ fn run_event_loop(
 fn handle_one_packet(
     q: &mut EventLoopQueryItem,
     events: &mut ClientEvents,
+    inventories: &mut Query<&Inventory, Without<Client>>,
+    inventory_settings: &Res<InventorySettings>,
 ) -> anyhow::Result<bool> {
     let Some(pkt) = q.client.dec.try_next_packet::<C2sPlayPacket>()? else {
         // No packets to decode.
@@ -829,7 +840,7 @@ fn handle_one_packet(
                 chat_mode: p.chat_mode,
                 chat_colors: p.chat_colors,
                 displayed_skin_parts: p.displayed_skin_parts,
-                main_hand: p.main_hand,
+                main_arm: p.main_arm,
                 enable_text_filtering: p.enable_text_filtering,
                 allow_server_listings: p.allow_server_listings,
             });
@@ -852,7 +863,57 @@ fn handle_one_packet(
             });
         }
         C2sPlayPacket::ClickSlotC2s(p) => {
-            if p.slot_idx < 0 {
+            let open_inv = q
+                .open_inventory
+                .as_ref()
+                .and_then(|open| inventories.get_mut(open.entity).ok());
+            if let Err(msg) =
+                crate::inventory::validate_click_slot_impossible(&p, &q.inventory, open_inv)
+            {
+                debug!(
+                    "client {:#?} invalid click slot packet: \"{}\" {:#?}",
+                    q.entity, msg, p
+                );
+                let inventory = open_inv.unwrap_or(&q.inventory);
+                q.client.write_packet(&InventoryS2c {
+                    window_id: if open_inv.is_some() {
+                        q.player_inventory_state.window_id
+                    } else {
+                        0
+                    },
+                    state_id: VarInt(q.player_inventory_state.state_id.0),
+                    slots: Cow::Borrowed(inventory.slot_slice()),
+                    carried_item: Cow::Borrowed(&q.cursor_item.0),
+                });
+                return Ok(true);
+            }
+            if inventory_settings.enable_item_dupe_check {
+                if let Err(msg) = crate::inventory::validate_click_slot_item_duplication(
+                    &p,
+                    &q.inventory,
+                    open_inv,
+                    &q.cursor_item,
+                ) {
+                    debug!(
+                        "client {:#?} click slot packet tried to incorrectly modify items: \"{}\" \
+                         {:#?}",
+                        q.entity, msg, p
+                    );
+                    let inventory = open_inv.unwrap_or(&q.inventory);
+                    q.client.write_packet(&InventoryS2c {
+                        window_id: if open_inv.is_some() {
+                            q.player_inventory_state.window_id
+                        } else {
+                            0
+                        },
+                        state_id: VarInt(q.player_inventory_state.state_id.0),
+                        slots: Cow::Borrowed(inventory.slot_slice()),
+                        carried_item: Cow::Borrowed(&q.cursor_item.0),
+                    });
+                    return Ok(true);
+                }
+            }
+            if p.slot_idx < 0 && p.mode == ClickMode::Click {
                 if let Some(stack) = q.cursor_item.0.take() {
                     events.2.drop_item_stack.send(DropItemStack {
                         client: entity,
@@ -1395,118 +1456,4 @@ fn handle_one_packet(
     }
 
     Ok(true)
-}
-
-/// The default event handler system which handles client events in a
-/// reasonable default way.
-///
-/// For instance, movement events are handled by changing the entity's
-/// position/rotation to match the received movement, crouching makes the
-/// entity crouch, etc.
-///
-/// This system's primary purpose is to reduce boilerplate code in the
-/// examples, but it can be used as a quick way to get started in your own
-/// code. The precise behavior of this system is left unspecified and
-/// is subject to change.
-///
-/// This system must be scheduled to run in the
-/// [`EventLoopSchedule`]. Otherwise, it may
-/// not function correctly.
-#[allow(clippy::too_many_arguments)]
-pub fn default_event_handler(
-    mut clients: Query<(&mut Client, Option<&mut McEntity>, &mut ViewDistance)>,
-    mut update_settings: EventReader<ClientSettings>,
-    mut player_move: EventReader<PlayerMove>,
-    mut start_sneaking: EventReader<StartSneaking>,
-    mut stop_sneaking: EventReader<StopSneaking>,
-    mut start_sprinting: EventReader<StartSprinting>,
-    mut stop_sprinting: EventReader<StopSprinting>,
-    mut swing_arm: EventReader<HandSwing>,
-) {
-    for ClientSettings {
-        client,
-        view_distance,
-        displayed_skin_parts,
-        main_hand,
-        ..
-    } in update_settings.iter()
-    {
-        if let Ok((_, mcentity, mut view_dist)) = clients.get_mut(*client) {
-            view_dist.set(*view_distance);
-
-            if let Some(mut entity) = mcentity {
-                if let TrackedData::Player(player) = entity.data_mut() {
-                    player.set_cape(displayed_skin_parts.cape());
-                    player.set_jacket(displayed_skin_parts.jacket());
-                    player.set_left_sleeve(displayed_skin_parts.left_sleeve());
-                    player.set_right_sleeve(displayed_skin_parts.right_sleeve());
-                    player.set_left_pants_leg(displayed_skin_parts.left_pants_leg());
-                    player.set_right_pants_leg(displayed_skin_parts.right_pants_leg());
-                    player.set_hat(displayed_skin_parts.hat());
-                    player.set_main_arm(*main_hand as u8);
-                }
-            }
-        }
-    }
-
-    for PlayerMove {
-        client,
-        position,
-        yaw,
-        pitch,
-        on_ground,
-        ..
-    } in player_move.iter()
-    {
-        if let Ok((_, Some(mut mcentity), _)) = clients.get_mut(*client) {
-            mcentity.set_position(*position);
-            mcentity.set_yaw(*yaw);
-            mcentity.set_head_yaw(*yaw);
-            mcentity.set_pitch(*pitch);
-            mcentity.set_on_ground(*on_ground);
-        }
-    }
-
-    for StartSneaking { client } in start_sneaking.iter() {
-        if let Ok((_, Some(mut entity), _)) = clients.get_mut(*client) {
-            if let TrackedData::Player(player) = entity.data_mut() {
-                player.set_pose(Pose::Sneaking);
-            }
-        };
-    }
-
-    for StopSneaking { client } in stop_sneaking.iter() {
-        if let Ok((_, Some(mut entity), _)) = clients.get_mut(*client) {
-            if let TrackedData::Player(player) = entity.data_mut() {
-                player.set_pose(Pose::Standing);
-            }
-        };
-    }
-
-    for StartSprinting { client } in start_sprinting.iter() {
-        if let Ok((_, Some(mut entity), _)) = clients.get_mut(*client) {
-            if let TrackedData::Player(player) = entity.data_mut() {
-                player.set_sprinting(true);
-            }
-        };
-    }
-
-    for StopSprinting { client } in stop_sprinting.iter() {
-        if let Ok((_, Some(mut entity), _)) = clients.get_mut(*client) {
-            if let TrackedData::Player(player) = entity.data_mut() {
-                player.set_sprinting(false);
-            }
-        };
-    }
-
-    for HandSwing { client, hand } in swing_arm.iter() {
-        if let Ok((_, Some(mut entity), _)) = clients.get_mut(*client) {
-            if entity.kind() == EntityKind::Player {
-                entity.trigger_animation(match hand {
-                    Hand::Main => EntityAnimation::SwingMainHand,
-                    Hand::Off => EntityAnimation::SwingOffHand,
-                });
-            }
-        };
-    }
 }

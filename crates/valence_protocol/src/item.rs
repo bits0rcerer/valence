@@ -16,8 +16,8 @@ pub struct ItemStack {
     pub nbt: Option<Compound>,
 }
 
-const STACK_MIN: u8 = 1;
-const STACK_MAX: u8 = 127;
+pub const STACK_MIN: u8 = 1;
+pub const STACK_MAX: u8 = 127;
 
 impl ItemStack {
     pub fn new(item: ItemKind, count: u8, nbt: Option<Compound>) -> Self {
@@ -37,6 +37,12 @@ impl ItemStack {
     /// which are the positive values accepted by clients.
     pub fn set_count(&mut self, count: u8) {
         self.count = count.clamp(STACK_MIN, STACK_MAX);
+    }
+}
+
+impl Default for ItemStack {
+    fn default() -> Self {
+        Self::new(ItemKind::Air, 1, None)
     }
 }
 
