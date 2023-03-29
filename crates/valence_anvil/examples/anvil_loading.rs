@@ -2,6 +2,7 @@ use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::thread;
+use std::time::Duration;
 
 use clap::Parser;
 use flume::{Receiver, Sender};
@@ -39,7 +40,7 @@ pub fn main() {
     tracing_subscriber::fmt().init();
 
     App::new()
-        .add_plugin(ServerPlugin::new(()))
+        .add_plugin(ServerPlugin::new(()).with_connection_mode(ConnectionMode::Offline))
         .add_startup_system(setup)
         .add_system(default_event_handler.in_schedule(EventLoopSchedule))
         .add_systems(
@@ -67,14 +68,16 @@ fn setup(world: &mut World) {
         world.send_event(AppExit);
     }
 
-    let anvil = AnvilWorld::new(dir);
+    let anvil = AnvilWorld::new(dir, 64, Duration::from_secs(120));
 
     let (finished_sender, finished_receiver) = flume::unbounded();
     let (pending_sender, pending_receiver) = flume::unbounded();
 
-    // Process anvil chunks in a different thread to avoid blocking the main tick
-    // loop.
-    thread::spawn(move || anvil_worker(pending_receiver, finished_sender, anvil));
+    // Process anvil chunks in a different thread to avoid blocking the main tick loop.
+    thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().expect("a new tokio runtime");
+        rt.block_on(anvil_worker(pending_receiver, finished_sender, anvil))
+    });
 
     world.insert_resource(GameState {
         pending: HashMap::new(),
@@ -179,13 +182,13 @@ fn send_recv_chunks(mut instances: Query<&mut Instance>, state: ResMut<GameState
     }
 }
 
-fn anvil_worker(
+async fn anvil_worker(
     receiver: Receiver<ChunkPos>,
     sender: Sender<(ChunkPos, Chunk)>,
     mut world: AnvilWorld,
 ) {
     while let Ok(pos) = receiver.recv() {
-        match get_chunk(pos, &mut world) {
+        match get_chunk(pos, &mut world).await {
             Ok(chunk) => {
                 if let Some(chunk) = chunk {
                     let _ = sender.try_send((pos, chunk));
@@ -196,9 +199,9 @@ fn anvil_worker(
     }
 }
 
-fn get_chunk(pos: ChunkPos, world: &mut AnvilWorld) -> anyhow::Result<Option<Chunk>> {
-    let Some(AnvilChunk { data, .. }) = world.read_chunk(pos.x, pos.z)? else {
-        return Ok(None)
+async fn get_chunk(pos: ChunkPos, world: &mut AnvilWorld) -> anyhow::Result<Option<Chunk>> {
+    let Some(AnvilChunk { data, .. }) = world.read_chunk(pos).await? else {
+        return Ok(None);
     };
 
     let mut chunk = Chunk::new(SECTION_COUNT);

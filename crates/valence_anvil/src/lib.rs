@@ -118,7 +118,7 @@ impl AnvilWorld {
             Err(e) => return Err(e.into()),
         };
 
-        let chunk_idx = (pos.x.rem_euclid(32) + pos.x.rem_euclid(32) * 32) as usize;
+        let chunk_idx = (pos.x.rem_euclid(32) + pos.z.rem_euclid(32) * 32) as usize;
 
         let location_bytes = (&region.header[chunk_idx * 4..]).read_u32().await?;
         let timestamp = (&region.header[chunk_idx * 4 + SECTOR_SIZE..]).read_u32().await?;
@@ -186,10 +186,6 @@ impl AnvilWorld {
     }
 
     async fn region<'a>(&self, regions: &'a mut Regions, region: (i32, i32)) -> Result<Option<&'a mut Region>, ReadChunkError> {
-        if !regions.contains_key(&region) {
-            return Ok(None);
-        }
-
         if regions.len() >= self.max_open_files {
             regions.retain(|_, r| r.last_use.elapsed() < self.region_retention);
 
