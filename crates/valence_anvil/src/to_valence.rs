@@ -78,7 +78,7 @@ pub enum ToValenceError {
 /// - `map_biome`: A function to map biome resource identifiers in the NBT data
 ///   to Valence [`BiomeId`]s.
 ///
-/// [`AnvilWorld::read_chunk`]: crate::AnvilWorld::read_chunk
+/// [`AnvilWorld::read_chunk`]: crate::AnvilWorld::read_chunk_sync
 pub fn to_valence<F, const LOADED: bool>(
     nbt: &Compound,
     chunk: &mut Chunk<LOADED>,
