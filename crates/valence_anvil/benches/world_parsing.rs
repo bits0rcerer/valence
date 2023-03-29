@@ -1,5 +1,9 @@
+#![feature(async_closure)]
+
 use std::fs::create_dir_all;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{ensure, Context};
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
@@ -8,6 +12,10 @@ use reqwest::IntoUrl;
 use valence::instance::Chunk;
 use valence_anvil::AnvilWorld;
 use zip::ZipArchive;
+use valence::prelude::ChunkPos;
+
+use tokio::runtime::Runtime;
+use tokio::sync::Mutex;
 
 criterion_group!(benches, criterion_benchmark);
 criterion_main!(benches);
@@ -16,31 +24,31 @@ fn criterion_benchmark(c: &mut Criterion) {
     let world_dir = get_world_asset(
         "https://github.com/valence-rs/valence-test-data/archive/refs/heads/asset/sp_world_1.19.2.zip",
         "1.19.2 benchmark world",
-        true
+        true,
     ).expect("failed to get world asset");
 
-    let mut world = AnvilWorld::new(world_dir);
+    let mut world = Arc::new(Mutex::new(AnvilWorld::new(world_dir, 64, Duration::from_secs(120))));
 
     c.bench_function("Load square 10x10", |b| {
-        b.iter(|| {
-            let world = black_box(&mut world);
+        b.to_async(Runtime::new().unwrap())
+            .iter(async || {
+                let world = &mut world.lock().await;
 
-            for z in -5..5 {
-                for x in -5..5 {
-                    let nbt = world
-                        .read_chunk(x, z)
-                        .expect("failed to read chunk")
-                        .expect("missing chunk at position")
-                        .data;
+                for z in -5..5 {
+                    for x in -5..5 {
+                        let nbt = world.read_chunk(ChunkPos::new(x, z)).await
+                            .expect("failed to read chunk")
+                            .expect("missing chunk at position")
+                            .data;
 
-                    let mut chunk = Chunk::new(24);
+                        let mut chunk = Chunk::new(24);
 
-                    valence_anvil::to_valence(&nbt, &mut chunk, 4, |_| Default::default()).unwrap();
+                        valence_anvil::to_valence(&nbt, &mut chunk, 4, |_| Default::default()).unwrap();
 
-                    black_box(chunk);
+                        black_box(chunk);
+                    }
                 }
-            }
-        });
+            });
     });
 }
 
