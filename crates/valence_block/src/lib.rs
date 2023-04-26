@@ -24,8 +24,9 @@ use std::fmt::Display;
 use std::io::Write;
 use std::iter::FusedIterator;
 
-use anyhow::Context;use serde::{Deserialize, Deserializer};
+use anyhow::Context;
 use serde::de::Error;
+use serde::{Deserialize, Deserializer};
 use valence_core::ident;
 use valence_core::ident::Ident;
 use valence_core::item::ItemKind;
@@ -138,7 +139,10 @@ mod tests {
 
 // Deserialize BlockStates from minecraft's datapacks using serde
 impl<'de> Deserialize<'de> for BlockState {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error> where D: Deserializer<'de> {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
         #[derive(Deserialize)]
         struct Raw {
             #[serde(rename = "Name")]
@@ -152,7 +156,9 @@ impl<'de> Deserialize<'de> for BlockState {
 
             fn try_from(value: Raw) -> std::result::Result<Self, Self::Error> {
                 if value.name.namespace() != "minecraft" {
-                    return Err("only blocks from the minecraft namespace can be deserialized".to_string());
+                    return Err(
+                        "only blocks from the minecraft namespace can be deserialized".to_string(),
+                    );
                 }
 
                 let kind = match BlockKind::from_str(value.name.path()) {
@@ -164,11 +170,15 @@ impl<'de> Deserialize<'de> for BlockState {
                 for (key, value) in value.properties {
                     let name = match PropName::from_str(&key) {
                         None => return Err(format!("unknown property \"{key}\"")),
-                        Some(name) => name
+                        Some(name) => name,
                     };
                     let value = match PropValue::from_str(&value) {
-                        None => return Err(format!("unable to parse property value \"{value}\" for \"{key}\"")),
-                        Some(value) => value
+                        None => {
+                            return Err(format!(
+                                "unable to parse property value \"{value}\" for \"{key}\""
+                            ))
+                        }
+                        Some(value) => value,
                     };
 
                     state = state.set(name, value);
@@ -178,6 +188,8 @@ impl<'de> Deserialize<'de> for BlockState {
             }
         }
 
-        Raw::deserialize(deserializer)?.try_into().map_err(|e| D::Error::custom(e))
+        Raw::deserialize(deserializer)?
+            .try_into()
+            .map_err(|e| D::Error::custom(e))
     }
 }

@@ -6,6 +6,8 @@ edition.workspace = true
 [dependencies]
 valence_core.workspace = true
 anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 [build-dependencies]
 anyhow.workspace = true
